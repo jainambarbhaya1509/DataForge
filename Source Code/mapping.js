@@ -39,11 +39,13 @@ It contains an async function that prompts the user for input, checks if certain
 and columns exist, and maps data from a source table to a destination table.
 */
 async function dataMapping() {
+
+    const source_cols_dt = [];
+
     const schema = prompt("Enter schema: ");
     console.log();
     const source_table = prompt("Enter source table: ");
-    const source_table_cols = prompt("Enter source table columns (comma-separated): ").split(",").map((col) => col.trim());
-    console.log(source_table_cols)
+    const source_table_cols = prompt("Enter source table columns (comma-separated): ").replace(/\s+/g, "").split(",");
 
     for (const source_column of source_table_cols) {
         const sourceExists = await checkTable(schema, source_table, source_column);
@@ -53,22 +55,41 @@ async function dataMapping() {
             console.log("Schema, Table, or Column does not exist.");
             return;
         }
+        else {
+            const data_type = await getSourceDatatype(source_table, source_column, source_cols_dt)
+            source_cols_dt.push(data_type);
+        }
     }
     console.log();
 
     const destination_table = prompt("Enter destination table: ");
-    const destination_table_cols = prompt("Enter destination table columns (comma-separated): ").split(",").map((col) => col.trim());
+    const destination_table_cols = prompt("Enter destination table columns (comma-separated): ").replace(/\s+/g, "").split(",");
 
     for (const destination_column of destination_table_cols) {
         const destinationExists = await checkTable(schema, destination_table, destination_column);
 
         if (!destinationExists) {
+            
             console.log("\nSchema, Table, or Column does not exist.");
-            return;
+            const askCreate = prompt(`Table ${destination_table} does not exists. Do you want to create it (Y/n): `);
+
+            if (askCreate === 'Y' || askCreate === 'y') {
+
+                const tableCols = destination_table_cols.map((_, index) => `${destination_table_cols[index]} ${source_cols_dt[index]}`).join(", ");
+                await createTable(schema, destination_table, tableCols)
+            }
+            else {
+                return;
+            }
         }
     }
 
-    await mapData(destination_table, destination_table_cols, source_table_cols, source_table);
+    try {
+        await mapData(destination_table, destination_table_cols, source_table_cols, source_table);
+    } catch (error) {
+        console.error("Error while mapping data: ", error)
+        throw error
+    }
 }
 
 /**
@@ -105,7 +126,7 @@ async function checkTable(schema, table, table_col) {
         return columnExists;
 
     } catch (error) {
-        console.log("Error checking the table: ", error);
+        console.error("Error checking the table: ", error);
         return false;
     }
 }
@@ -133,7 +154,41 @@ async function mapData(destination_table, destination_table_cols, source_table_c
         await client.query(query);
         client.release();
     } catch (error) {
-        console.log("Error mapping the data: ", error);
+        console.error("Error mapping the data: ", error);
+    }
+}
+
+async function createTable(schema, destination_table, tableCols) {
+    try {
+        const client = await pool.connect();
+        const query = `CREATE TABLE IF NOT EXISTS ${schema}.${destination_table} ( ${tableCols} );`;
+        console.log(query);
+        await client.query(query);
+        client.release();
+    } catch (error) {
+        throw error;
+    }
+}
+
+async function getSourceDatatype(source_table, source_column) {
+    try {
+        const client = await pool.connect();
+        query = `SELECT attname, format_type(atttypid, atttypmod) AS data_type
+        FROM pg_attribute
+        WHERE attrelid = '${source_table}'::regclass
+        AND attname = '${source_column}'
+        AND attnum > 0;
+        `
+        const result = await client.query(query);
+        const data_type = result.rows[0].data_type;
+
+        client.release()
+
+        return data_type
+
+    } catch (error) {
+        console.log(error)
+        throw error;
     }
 }
 
