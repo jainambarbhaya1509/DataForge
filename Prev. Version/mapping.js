@@ -114,10 +114,49 @@ async function dataMapping() {
     );
     console.log();
 
+    const normalizing_cols_dt = [];
+    console.log();
+    const normalize_cols = (
+      await question("Enter logical column name for normalization (comma-separated): ")
+    )
+      .replace(/\s+/g, "")
+      .split(",");
+
+    for (const normalize_col of normalize_cols) {
+      const colsExists = await checkTable(
+        schema,
+        destination_table,
+        normalize_col
+      );
+
+      if (!colsExists) {
+        console.log(`"${normalize_col}" column does not exist`);
+        return;
+      }
+    }
+
+    for (const normalize_col of normalize_cols) {
+      const data_type = await getSourceDatatype(
+        destination_table,
+        normalize_col,
+        normalizing_cols_dt
+      );
+      normalizing_cols_dt.push(data_type);
+      const tableCols = `${normalize_col} ${normalizing_cols_dt[normalizing_cols_dt.length - 1]}`;
+
+      await createTable(schema, normalize_col, tableCols);
+      await addPrimaryKey(schema, normalize_col);
+      await createReference(schema, destination_table, normalize_col);
+      await mapDistinctValue(
+        normalize_col,
+        normalize_col,
+        normalize_col,
+        destination_table
+      );
+      await reflectChanges(schema, destination_table, normalize_col);
+    }
   } catch (error) {
     throw error;
-  } finally {
-    await disconnectFromPostgreSQL();
   }
 }
 
@@ -211,6 +250,31 @@ async function getSourceDatatype(source_table, source_column) {
   }
 }
 
+async function mapDistinctValue(
+  normalization_table,
+  normalization_table_cols,
+  destination_column,
+  destination_table
+) {
+  try {
+    const client = await pool.connect();
+    const query = `INSERT INTO ${normalization_table} (${normalization_table_cols})
+      SELECT DISTINCT ${destination_column}
+      FROM ${destination_table}
+      WHERE NOT EXISTS (
+      SELECT 1
+      FROM ${normalization_table}
+      WHERE ${normalization_table}.${normalization_table_cols} = ${destination_table}.${destination_column}
+      ) ORDER BY ${destination_column} ASC;`;
+
+    await client.query(query);
+    client.release();
+  } catch (error) {
+    console.log("Error mapping the data:", error);
+    throw error;
+  }
+}
+
 async function addPrimaryKey(schema, destination_table) {
   try {
     const client = await pool.connect();
@@ -226,6 +290,77 @@ async function addPrimaryKey(schema, destination_table) {
   }
 }
 
+async function createReference(schema, destination_table, normalize_col) {
+  try {
+    const client = await pool.connect();
+
+    // Retrieve primary key column names for destination_table
+    const destinationColumnsQuery = `
+      SELECT a.attname AS column_name
+      FROM pg_constraint c
+      JOIN pg_class t ON c.conrelid = t.oid
+      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+      WHERE t.relname = '${destination_table}'
+      AND c.contype = 'p'
+    `;
+    const destinationColumnsResult = await client.query(destinationColumnsQuery);
+    const destinationColumns = destinationColumnsResult.rows
+      .map((row) => row.column_name)
+      .join(", ");
+
+    // Retrieve primary key column names for normalize_col
+    const normalizeColumnsQuery = `
+      SELECT a.attname AS column_name
+      FROM pg_constraint c
+      JOIN pg_class t ON c.conrelid = t.oid
+      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+      WHERE t.relname = '${normalize_col}'
+      AND c.contype = 'p'
+    `;
+    const normalizeColumnsResult = await client.query(normalizeColumnsQuery);
+    const normalizeColumns = normalizeColumnsResult.rows
+      .map((row) => row.column_name)
+      .join(", ");
+
+    // Construct and execute the ALTER TABLE statement
+    const alterTableQuery = `
+      ALTER TABLE IF EXISTS ${schema}.${destination_table}
+      ADD CONSTRAINT fk_${destination_table}_${normalize_col} FOREIGN KEY (${destinationColumns})
+      REFERENCES ${schema}.${normalize_col} (${normalizeColumns}) MATCH SIMPLE
+      ON UPDATE NO ACTION
+      ON DELETE NO ACTION
+      DEFERRABLE INITIALLY DEFERRED
+      NOT VALID;
+    `;
+
+    await client.query(alterTableQuery);
+    client.release();
+    console.log(`Foreign key added to table "${destinationColumns}"`);
+  } catch (error) {
+    throw error;
+  }
+}
+
+async function reflectChanges(schema, destination_table, normalize_col) {
+  try {
+    const client = await pool.connect();
+
+    const query = `
+    UPDATE ${schema}.${destination_table}
+    SET ${normalize_col} = ${normalize_col}.id
+    FROM ${schema}.${normalize_col}
+    WHERE ${schema}.${destination_table}.${normalize_col} = ${schema}.${normalize_col}.${normalize_col};
+    `;
+
+    await client.query(query);
+    client.release();
+    console.log(
+      `Data reflected from "${normalize_col}" to "${destination_table}"`
+    );
+  } catch (error) {
+    throw error;
+  }
+}
 
 // Main function
 async function main() {
