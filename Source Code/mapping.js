@@ -65,8 +65,7 @@ async function dataMapping() {
       } else {
         const data_type = await getSourceDatatype(
           source_table,
-          source_column,
-          source_cols_dt
+          source_column
         );
         source_cols_dt.push(data_type);
       }
@@ -113,6 +112,15 @@ async function dataMapping() {
       source_table
     );
     console.log();
+
+    const source_link = await question("Enter source table to link: ")
+
+    const destination_link = await question("Enter destination to link: ")
+
+    console.log("Source table to link:", source_link);
+    console.log("Destination table to link:", destination_link);
+
+    await linkTables(schema, source_link, destination_link);
 
   } catch (error) {
     throw error;
@@ -226,6 +234,58 @@ async function addPrimaryKey(schema, destination_table) {
   }
 }
 
+async function linkTables(schema, source_link, destination_link) {
+  try {
+    const client = await pool.connect();
+
+    // Retrieve primary key column names for source_link
+    const sourceLinkQuery = `
+      SELECT a.attname AS column_name
+      FROM pg_constraint c
+      JOIN pg_class t ON c.conrelid = t.oid
+      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+      WHERE t.relname = '${source_link}'
+      AND c.contype = 'p'
+    `;
+
+    const sourceLinkResult = await client.query(sourceLinkQuery);
+    const sourceColumns = sourceLinkResult.rows
+      .map((row) => row.column_name)
+      .join(", ");
+
+    // Retrieve primary key column names for destination_link
+    const destinationLinkQuery = `
+      SELECT a.attname AS column_name
+      FROM pg_constraint c
+      JOIN pg_class t ON c.conrelid = t.oid
+      JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+      WHERE t.relname = '${destination_link}'
+      AND c.contype = 'p'
+    `;
+
+    const destinationLinkResult = await client.query(destinationLinkQuery);
+    const destinationColumns = destinationLinkResult.rows
+      .map((row) => row.column_name)
+      .join(", ");
+
+    // Construct and execute the ALTER TABLE statement
+    const alterTableQuery = `
+      ALTER TABLE IF EXISTS ${schema}.${source_link}
+      ADD CONSTRAINT fk_${source_link}_${destination_link} FOREIGN KEY (${sourceColumns})
+      REFERENCES ${schema}.${destination_link} (${destinationColumns}) MATCH SIMPLE
+      ON UPDATE NO ACTION
+      ON DELETE NO ACTION
+      DEFERRABLE INITIALLY DEFERRED
+      NOT VALID;
+    `;
+
+    await client.query(alterTableQuery);
+    client.release();
+    console.log(`Foreign key added to table "${source_link}"`);
+  } catch (error) {
+    throw error;
+  }
+}
 
 // Main function
 async function main() {
